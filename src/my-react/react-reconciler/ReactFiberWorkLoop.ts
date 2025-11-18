@@ -2,8 +2,9 @@
 
 import type { Fiber } from './ReactFiber';
 import type { FiberRoot } from './ReactFiberRoot';
-import { WorkTag } from './ReactFiber';
+import { WorkTag, Flags, createFiberFromElement, createFiberFromText, createWorkInProgress } from './ReactFiber';
 import { processUpdateQueue } from './ReactUpdateQueue';
+import type { ReactNode, ReactElement } from '../react/ReactTypes';
 
 // 工作循环状态
 type WorkStatus = 'Idle' | 'Working' | 'Committing';
@@ -11,7 +12,6 @@ type WorkStatus = 'Idle' | 'Working' | 'Committing';
 // 全局工作状态
 let workStatus: WorkStatus = 'Idle';
 let workInProgress: Fiber | null = null;
-let workInProgressRoot: FiberRoot | null = null;
 
 /**
  * 调度更新到 Fiber 节点
@@ -61,7 +61,6 @@ function ensureRootIsScheduled(root: FiberRoot): void {
   
   // 设置工作状态为工作中
   workStatus = 'Working';
-  workInProgressRoot = root;
   
   // 开始工作循环
   performSyncWorkOnRoot(root);
@@ -148,13 +147,16 @@ function beginWork(current: Fiber | null, workInProgress: Fiber): Fiber | null {
  * 更新根节点
  */
 function updateHostRoot(current: Fiber | null, workInProgress: Fiber): Fiber | null {
-  // 根节点的子节点就是我们要渲染的元素
-  const nextProps = workInProgress.pendingProps;
-  const element = nextProps.element;
-  
-  // 克隆子节点
-  cloneChildFibers(current, workInProgress);
-  
+  // 根节点的子节点就是我们要渲染的元素（来自更新队列处理后的 memoizedState）
+  const element = workInProgress.memoizedState;
+
+  // 初次挂载：根据 element 创建子 Fiber；更新：克隆子节点
+  if (current === null || current.child === null) {
+    mountChildFibers(workInProgress, element);
+  } else {
+    cloneChildFibers(current, workInProgress);
+  }
+
   // 返回第一个子节点作为下一个工作单元
   return workInProgress.child;
 }
@@ -163,10 +165,16 @@ function updateHostRoot(current: Fiber | null, workInProgress: Fiber): Fiber | n
  * 更新 DOM 元素
  */
 function updateHostComponent(current: Fiber | null, workInProgress: Fiber): Fiber | null {
-  // 对于 DOM 元素，我们只需要克隆子节点
-  cloneChildFibers(current, workInProgress);
-  
-  // 返回第一个子节点作为下一个工作单元
+  // 挂载或更新子节点
+  const nextProps = workInProgress.pendingProps;
+  const nextChildren = nextProps ? nextProps.children : null;
+
+  if (current === null || current.child === null) {
+    mountChildFibers(workInProgress, nextChildren);
+  } else {
+    cloneChildFibers(current, workInProgress);
+  }
+
   return workInProgress.child;
 }
 
@@ -174,10 +182,16 @@ function updateHostComponent(current: Fiber | null, workInProgress: Fiber): Fibe
  * 更新函数组件
  */
 function updateFunctionComponent(current: Fiber | null, workInProgress: Fiber): Fiber | null {
-  // 对于函数组件，我们暂时不处理 hooks，直接克隆子节点
-  cloneChildFibers(current, workInProgress);
-  
-  // 返回第一个子节点作为下一个工作单元
+  // 暂不处理 hooks，先支持基本 children 挂载/更新
+  const nextProps = workInProgress.pendingProps;
+  const nextChildren = nextProps ? nextProps.children : null;
+
+  if (current === null || current.child === null) {
+    mountChildFibers(workInProgress, nextChildren);
+  } else {
+    cloneChildFibers(current, workInProgress);
+  }
+
   return workInProgress.child;
 }
 
@@ -185,10 +199,16 @@ function updateFunctionComponent(current: Fiber | null, workInProgress: Fiber): 
  * 更新类组件
  */
 function updateClassComponent(current: Fiber | null, workInProgress: Fiber): Fiber | null {
-  // 对于类组件，我们暂时不处理实例化，直接克隆子节点
-  cloneChildFibers(current, workInProgress);
-  
-  // 返回第一个子节点作为下一个工作单元
+  // 暂不处理实例化，先支持基本 children 挂载/更新
+  const nextProps = workInProgress.pendingProps;
+  const nextChildren = nextProps ? nextProps.children : null;
+
+  if (current === null || current.child === null) {
+    mountChildFibers(workInProgress, nextChildren);
+  } else {
+    cloneChildFibers(current, workInProgress);
+  }
+
   return workInProgress.child;
 }
 
@@ -218,6 +238,47 @@ function cloneChildFibers(current: Fiber | null, workInProgress: Fiber): void {
   }
   
   newChild.sibling = null;
+}
+
+/**
+ * 初次挂载：从 children 创建子 Fiber 节点
+ */
+function mountChildFibers(parent: Fiber, children: ReactNode): void {
+  if (children === null || children === undefined || children === false) {
+    parent.child = null;
+    return;
+  }
+
+  // 统一处理数组和单个 child
+  const childArray: ReactNode[] = Array.isArray(children) ? children : [children];
+
+  let prevFiber: Fiber | null = null;
+  let index = 0;
+  for (const child of childArray) {
+    let newFiber: Fiber;
+
+    if (typeof child === 'string' || typeof child === 'number') {
+      newFiber = createFiberFromText(String(child));
+    } else if (typeof child === 'object' && child !== null && '$$typeof' in child) {
+      newFiber = createFiberFromElement(child as ReactElement);
+    } else {
+      // 不支持的 child，跳过
+      index++;
+      continue;
+    }
+
+    newFiber.return = parent;
+    newFiber.index = index++;
+    // 初次挂载标记插入副作用
+    newFiber.flags |= Flags.Placement;
+
+    if (prevFiber === null) {
+      parent.child = newFiber;
+    } else {
+      prevFiber.sibling = newFiber;
+    }
+    prevFiber = newFiber;
+  }
 }
 
 /**
@@ -258,12 +319,38 @@ function completeWork(workInProgress: Fiber): void {
       break;
     
     case WorkTag.HostComponent:
-      // DOM 元素完成工作
-      // 这里应该创建或更新实际的 DOM 节点
+      // 创建或更新实际的 DOM 节点
+      if (workInProgress.stateNode == null) {
+        const type = workInProgress.type as string;
+        const dom = document.createElement(type) as HTMLElement;
+
+        // 设置属性（简化实现）
+        const props = (workInProgress.pendingProps || workInProgress.memoizedProps || {}) as Record<string, unknown>;
+        for (const key in props) {
+          if (key === 'children') continue;
+          const val = props[key];
+          if (key === 'className' && typeof val === 'string') {
+            dom.className = val;
+          } else if (key === 'style' && val && typeof val === 'object') {
+            Object.assign(dom.style, val as Record<string, string>);
+          } else if (key.startsWith('on') && typeof val === 'function') {
+            const event = key.slice(2).toLowerCase();
+            dom.addEventListener(event, val as EventListener);
+          } else if (val != null) {
+            dom.setAttribute(key, String(val));
+          }
+        }
+
+        workInProgress.stateNode = dom;
+      }
       break;
     
     case WorkTag.HostText:
-      // 文本节点完成工作
+      if (workInProgress.stateNode == null) {
+        const text = String(workInProgress.pendingProps ?? workInProgress.memoizedProps ?? '');
+        const dom = document.createTextNode(text);
+        workInProgress.stateNode = dom;
+      }
       break;
     
     case WorkTag.FunctionComponent:
@@ -318,7 +405,6 @@ function commitRoot(root: FiberRoot): void {
   if (finishedWork === null) {
     // 没有完成的工作，重置状态并返回
     workStatus = 'Idle';
-    workInProgressRoot = null;
     return;
   }
   
@@ -331,7 +417,6 @@ function commitRoot(root: FiberRoot): void {
   
   // 重置工作状态
   workStatus = 'Idle';
-  workInProgressRoot = null;
 }
 
 /**
@@ -375,80 +460,45 @@ function commitAllEffects(finishedWork: Fiber): void {
  * 提交插入操作
  */
 function commitPlacement(finishedWork: Fiber): void {
-  // 这里应该实现实际的 DOM 插入操作
-  console.log('Committing placement for fiber:', finishedWork);
+  const parentDom = getHostParentDom(finishedWork);
+  if (!parentDom) return;
+
+  const dom = finishedWork.stateNode;
+  if (dom != null && parentDom) {
+    parentDom.appendChild(dom);
+  }
 }
 
 /**
  * 提交更新操作
  */
 function commitUpdate(finishedWork: Fiber): void {
-  // 这里应该实现实际的 DOM 更新操作
-  console.log('Committing update for fiber:', finishedWork);
+  // 简化：初始版本不做细粒度属性 diff
+  void finishedWork;
 }
 
 /**
  * 提交删除操作
  */
 function commitDeletion(finishedWork: Fiber): void {
-  // 这里应该实现实际的 DOM 删除操作
-  console.log('Committing deletion for fiber:', finishedWork);
+  const dom = finishedWork.stateNode;
+  const parentDom = getHostParentDom(finishedWork);
+  if (dom && parentDom && parentDom.contains(dom)) {
+    parentDom.removeChild(dom);
+  }
 }
 
-// 从 ReactFiber.ts 导入 createWorkInProgress 函数
-// 注意：在实际实现中，我们应该从 ReactFiber.ts 导入这个函数
-// 但由于我们在同一个目录下，我们可以直接访问它
-function createWorkInProgress(current: Fiber, pendingProps: any): Fiber {
-  let workInProgress = current.alternate;
-  
-  if (workInProgress === null) {
-    // 首次渲染，创建新的 work-in-progress 节点
-    workInProgress = {
-      tag: current.tag,
-      key: current.key,
-      elementType: current.elementType,
-      type: current.type,
-      stateNode: current.stateNode,
-      return: null,
-      child: null,
-      sibling: null,
-      index: 0,
-      ref: current.ref,
-      pendingProps,
-      memoizedProps: current.memoizedProps,
-      updateQueue: current.updateQueue,
-      memoizedState: current.memoizedState,
-      flags: 0,
-      subtreeFlags: 0,
-      nextEffect: null,
-      firstEffect: null,
-      lastEffect: null,
-      alternate: current,
-    };
-    
-    // 建立双向连接
-    current.alternate = workInProgress;
-  } else {
-    // 复用已有的 work-in-progress 节点
-    workInProgress.pendingProps = pendingProps;
-    workInProgress.type = current.type;
-    
-    // 清除副作用
-    workInProgress.flags = 0;
-    workInProgress.subtreeFlags = 0;
-    workInProgress.nextEffect = null;
-    workInProgress.firstEffect = null;
-    workInProgress.lastEffect = null;
+function getHostParentDom(fiber: Fiber): Element | DocumentFragment | null {
+  let parent = fiber.return;
+  while (parent) {
+    if (parent.tag === WorkTag.HostComponent) {
+      return parent.stateNode as Element;
+    }
+    if (parent.tag === WorkTag.HostRoot) {
+      const root = parent.stateNode as FiberRoot;
+      return root.containerInfo;
+    }
+    parent = parent.return;
   }
-  
-  // 复制其他属性
-  workInProgress.child = current.child;
-  workInProgress.memoizedProps = current.memoizedProps;
-  workInProgress.memoizedState = current.memoizedState;
-  workInProgress.updateQueue = current.updateQueue;
-  workInProgress.sibling = current.sibling;
-  workInProgress.index = current.index;
-  workInProgress.ref = current.ref;
-  
-  return workInProgress;
+  return null;
 }
