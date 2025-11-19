@@ -4,7 +4,7 @@ import type { Fiber } from './ReactFiber';
 import type { FiberRoot } from './ReactFiberRoot';
 import { WorkTag, Flags, createFiberFromElement, createFiberFromText, createWorkInProgress } from './ReactFiber';
 import { processUpdateQueue } from './ReactUpdateQueue';
-import type { ReactNode, ReactElement } from '../react/ReactTypes';
+import type { ReactNode, ReactElement, JSXElementConstructor } from '../react/ReactTypes';
 
 // 工作循环状态
 type WorkStatus = 'Idle' | 'Working' | 'Committing';
@@ -182,9 +182,18 @@ function updateHostComponent(current: Fiber | null, workInProgress: Fiber): Fibe
  * 更新函数组件
  */
 function updateFunctionComponent(current: Fiber | null, workInProgress: Fiber): Fiber | null {
-  // 暂不处理 hooks，先支持基本 children 挂载/更新
-  const nextProps = workInProgress.pendingProps;
-  const nextChildren = nextProps ? nextProps.children : null;
+  // 暂不处理 hooks，执行函数组件以获取其返回的子树
+  const nextProps = (workInProgress.pendingProps || {}) as Record<string, unknown>;
+  const Component = workInProgress.type as JSXElementConstructor<unknown> | ((props: Record<string, unknown>) => ReactNode);
+
+  let nextChildren: ReactNode = null;
+  // 函数组件：调用以获得返回的 ReactElement/ReactNode
+  if (typeof Component === 'function') {
+    nextChildren = (Component as (props: Record<string, unknown>) => ReactNode)(nextProps);
+  } else {
+    // 理论上不会进入此分支（FunctionComponent 的 type 应该是函数）
+    nextChildren = null;
+  }
 
   if (current === null || current.child === null) {
     mountChildFibers(workInProgress, nextChildren);
